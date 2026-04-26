@@ -7,8 +7,8 @@ Running log of setting up a MU Online private server from the [MUnique/OpenMU](h
 **Path chosen:** Manual build with .NET SDK (Docker installation was not possible).
 **Phase approach:**
 - **Phase A** = in-memory demo run (no database) — smoke test that the server + admin panel come up and a real client can log in. ✅ done
-- **Phase B** = real run with PostgreSQL (persistent accounts/characters). ✅ server is up, admin-panel verification pending
-- **Phase C** = customisation (game version, XP/drop rates, plugin toggles) — pending
+- **Phase B** = real run with PostgreSQL (persistent accounts/characters). ✅ done — verified end-to-end on 2026-04-26: custom account `edwin` created in admin panel, Dark Knight character `6GOD` created in-game, played + leveled to EXP 5671 / 30 stat pts, character + progression confirmed to persist across server restart
+- **Phase C** = customisation (game version, XP/drop rates, plugin toggles, GM commands per `GMchat.md`) — pending
 - **Phase D** = public hosting on a Linux VPS via the `deploy/all-in-one` Docker stack — pending
 
 ---
@@ -33,8 +33,10 @@ Running log of setting up a MU Online private server from the [MUnique/OpenMU](h
 | 14 | done | Discovered + fixed **Bug 3** (two migrations missing `[Migration]` attribute, silently skipped) | See Bug 3 below |
 | 15 | done | Rebuilt `Startup` project so its `bin\Release\` picked up the new `EntityFramework.dll` (Bug 3 sub-gotcha) | — |
 | 16 | done | Launched server in real-DB mode. Initialization took ~22s: EF migrations applied, subordinate roles created, initial Season-6 data seeded, host started in 27.6 s total | DB has `openmu` database + `config/account/friend/guild` roles; `GameConfiguration` table has the `ExcellentItemDropLevelDelta` + `MasterExperienceRate` columns; all 10 ports listening |
-| 17 | pending | Admin panel verification against real DB — check servers/accounts/maps, click Start on game servers | — |
-| 18 | pending | Reconnect client, create a non-test account + character, restart server, confirm it persists | — |
+| 17a | done | Phase B re-launch on 2026-04-26: server came up clean in 12.6 s (no reinit needed, DB survived from previous session). All 12 expected ports listening: 80 (admin panel), 44405–44408 (4 Connect Servers — extra `44407/44408` were configured in admin panel earlier), 55901–55906 (6 Game Servers), 55980 (Chat Server). `Invoke-WebRequest http://localhost/` returns `HTTP 200 OK` on Kestrel. | Server log shows `Host started, elapsed time: 00:00:12.5882078`; all 3 game servers labelled "PREMIUM PROMAX" registered with endpoint `127.127.127.127:55901-55906` against all 4 connect servers |
+| 17b | done | Pre-launch DB sanity check: `data."Account"` has 20 rows (all seeded test accounts present including `testgm`/`testgm2`/`testunlock`); `config."GameConfiguration"` has 1 row. Note: `config."__EFMigrationsHistory"` does NOT exist — confirms the previous Phase B init went through the EF `EnsureCreated` fallback path, not `Migrate`. Schema and seed data are correct, but a future migration would not be auto-applied. | psql `\dt` + counts |
+| 17c | done | Admin-panel walkthrough verified: created custom account `edwin` (State=GameMaster, BCrypt-hashed password) via the Accounts → "Create new" modal — row landed in `data."Account"` correctly. Implies Accounts page, modal, and EF write path all work against the real DB. | `data."Account"` row for `edwin` registered 2026-04-26 11:33:53 |
+| 18 | done | Persistence test passed end-to-end. Logged in as `edwin/edwin` via launcher (port 44405, host 127.127.127.127), created a Dark Knight character `6GOD` (4 chars — see Gotcha below). Spawned at Lorencia entry gate (150,129). Played, leveled up. Verified row persists across disconnect+reconnect; user confirmed character + progression also persist across server restart. Final captured state: Experience=5671, LevelUpPoints=30, position (149,121), CharacterStatus=0. **Phase B fully verified.** | psql query against `data."Character"` |
 | 19 | pending | Phase C — customise game version / XP / drop rates / plugin toggles via admin panel | — |
 | 20 | pending | Phase C — set up a `pg_dump` backup before any `-reinit` | — |
 | 21 | pending | Phase D — rent Linux VPS, deploy `OpenMU/deploy/all-in-one/` there with `RESOLVE_IP=public` or domain name | — |
@@ -244,6 +246,18 @@ Server log:
 `src/Startup/Readme.md` line 32 documents the flag as **`-deamon`** — note the typo (should be `daemon`). When running detached / in the background on Windows, pass `-deamon` or the process will sit waiting for keyboard input.
 
 ---
+
+### Gotcha: MU client (`Main.exe`) UI rejects 3-letter character names
+
+The OpenMU server-side `GameConfiguration.CharacterNameRegex` defaults to `^[a-zA-Z0-9]{3,10}$` — i.e. 3–10 alphanumeric chars are allowed at the protocol/server/DB level. But the Webzen `Main.exe` character-creation dialog has a **client-side hardcoded minimum of 4 characters** that fires before any packet reaches the server. Source-of-truth flow: `src/GameLogic/PlayerActions/Character/CreateCharacterAction.cs:56` does `Regex.IsMatch(name, GameConfiguration.CharacterNameRegex)` against the configured regex; the wire format `docs/Packets/C1-F3-01-CharacterCreationSuccessful_by-server.md` reserves 10 bytes; DB column `data."Character"."Name"` is plain `text` with only the unique index `IX_Character_Name`. So if you want 3-letter names, the only real fix is a hex edit of `Main.exe` (risky) or use the open-source MuMain client on port 44406 (rougher but no Webzen UI lock).
+
+### Gotcha: Account creation has no in-game / launcher path
+
+`src/GameLogic/PlayerActions/LoginAction.cs:58-77` shows the login flow: if `AuthenticateAsync` returns null (account-not-found OR wrong password), the client just gets `LoginResult.InvalidPassword` — the misleading "incorrect password" message even when the account doesn't exist. There is no auto-create-on-first-login branch. The only built-in account-creation path is the **admin panel** (`src/Web/Shared/Services/AccountService.cs:82` — `CreateNewInModalDialogAsync`). The form requires LoginName (3-10), Password (3-20), SecurityCode (3-10, **required even though the launcher never asks for it**), and an optional EMail. Password is hashed with BCrypt before INSERT.
+
+### Gotcha: MU client window mode lives in the registry
+
+The Webzen client reads display settings from `HKEY_CURRENT_USER\SOFTWARE\WebZen\Mu\Config` at startup (DWORDs: `WindowMode 0|1`, `Resolution`, `ColorDepth`, `MusicOnOff`, `SoundOnOff`, `VolumeLevel`; string: `LangSelection`). Source: `src/ClientLauncher/ClientSettings.cs:67-93`. Setting it via `Set-ItemProperty -Path 'HKCU:\SOFTWARE\WebZen\Mu\Config' -Name WindowMode -Value 1 -Type DWord` works (verified). The OpenMU launcher's "Settings" button opens a dialog that toggles the same registry values — either path is fine. Note the launcher uses `RegistryView.Registry32` so on some Windows installs it may write to the WoW6432Node redirect — on this machine it ended up at the non-redirected key.
 
 ### Gotcha: Serilog writes logs relative to the **working directory**, not the project
 
@@ -490,6 +504,13 @@ From `OpenMU/QuickStart.md` lines 131–145. Password always equals the username
 - **Version:** Season 6 (user-supplied).
 - **Launcher used:** `MUnique.OpenMU.ClientLauncher v0.9.6`, download URL: `https://github.com/MUnique/OpenMU/releases/download/v0.9.0/MUnique.OpenMU.ClientLauncher_0.9.6.zip`.
 - **Launcher config:** Server IP = `127.127.127.127`, Port = `44405`, Client path = the folder containing `Main.exe`.
+- **Window mode:** the Webzen client reads `HKCU:\SOFTWARE\WebZen\Mu\Config\WindowMode` (DWORD, 0=fullscreen, 1=windowed) on every launch. Currently set to `1` for this user. Either edit the registry directly (`Set-ItemProperty -Path 'HKCU:\SOFTWARE\WebZen\Mu\Config' -Name WindowMode -Value 1 -Type DWord`) or use the launcher's "Settings" dialog (`MainForm.cs:137-149` → `ClientSettingsDialog`).
+
+### Custom account & character (created on 2026-04-26)
+
+| Account | Password | State | Char | Class | Notes |
+|---|---|---|---|---|---|
+| `edwin` | `edwin` | `GameMaster` (=2) | `6GOD` | Dark Knight | Created via admin panel modal. Character created via in-game launcher. CharacterStatus on 6GOD is still 0 (Normal) — to use slash-commands per `GMchat.md`, run `UPDATE data."Character" SET "CharacterStatus" = 32 WHERE "Name" = '6GOD';` |
 
 ---
 
@@ -501,3 +522,7 @@ From `OpenMU/QuickStart.md` lines 131–145. Password always equals the username
 - [ ] The three "orphan" migrations (no `.Designer.cs`) — is there a repo convention where Designer files are git-ignored and regenerated? If so, the `[Migration]` attributes should probably be enforced inline on every future migration by a code-review rule. Upstream bug candidate.
 - [ ] `OpenMU/deploy/distributed/` is marked **broken and unsupported** in `OpenMU/deploy/README.md` line 60 — skip unless we want to fix it.
 - [ ] Security for Phase D: admin panel currently has NO auth on the manual-run path. Before exposing publicly, either put it behind nginx basic-auth (like the Docker stack does) or add `-adminpanel:disabled` and administer via local-only SSH tunnel.
+- [ ] **EF migration history is missing** (`config."__EFMigrationsHistory"` doesn't exist) because the first Phase B init hit the `EnsureCreated` fallback path. Schema is correct *now*, but if upstream ships a future migration, `MigrateAsync()` may not detect that none have been applied. Either reinit cleanly, or manually populate the history table with the IDs of every migration in `Migrations/`. Worth resolving before Phase D.
+- [ ] Account.State = 2 = `GameMaster` on the account (set during admin-panel modal) does NOT automatically promote characters created on that account — character `6GOD` was created with `CharacterStatus = 0` despite the parent account being GM. The two are independent fields. Worth reading `src/GameLogic/PlayerActions/Character/CreateCharacterAction.cs` to see why and whether it's intentional.
+- [ ] `ClientLauncher/ClientSettings.cs` uses `RegistryView.Registry32` but on this machine the values landed in the non-redirected `HKCU:\SOFTWARE\WebZen\Mu\Config`, not `HKCU:\SOFTWARE\WOW6432Node\WebZen\Mu\Config`. Worth confirming what governs this — likely the bitness of the launcher process, since on 64-bit Windows registry redirection only kicks in for 32-bit processes. The launcher's TFM might be `net10.0-windows` not `net10.0-windows-x86`, so it's a 64-bit process and writes go straight to the unredirected key.
+- [ ] **3-letter character names**: server regex (`^[a-zA-Z0-9]{3,10}$`) and packet wire format both allow 3 chars, but the Webzen `Main.exe` UI hardcodes a 4-char minimum. Either hex-edit `Main.exe` or use the open-source MuMain client (port 44406). Punted for now.
