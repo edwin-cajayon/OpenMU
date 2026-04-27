@@ -38,8 +38,9 @@ Running log of setting up a MU Online private server from the [MUnique/OpenMU](h
 | 17c | done | Admin-panel walkthrough verified: created custom account `edwin` (State=GameMaster, BCrypt-hashed password) via the Accounts → "Create new" modal — row landed in `data."Account"` correctly. Implies Accounts page, modal, and EF write path all work against the real DB. | `data."Account"` row for `edwin` registered 2026-04-26 11:33:53 |
 | 18 | done | Persistence test passed end-to-end. Logged in as `edwin/edwin` via launcher (port 44405, host 127.127.127.127), created a Dark Knight character `6GOD` (4 chars — see Gotcha below). Spawned at Lorencia entry gate (150,129). Played, leveled up. Verified row persists across disconnect+reconnect; user confirmed character + progression also persist across server restart. Final captured state: Experience=5671, LevelUpPoints=30, position (149,121), CharacterStatus=0. **Phase B fully verified.** | psql query against `data."Character"` |
 | 19 | pending | Phase C — customise game version / XP / drop rates / plugin toggles via admin panel | — |
-| 20 | pending | Phase C — set up a `pg_dump` backup before any `-reinit` | — |
-| 21 | pending | Phase D — rent Linux VPS, deploy `OpenMU/deploy/all-in-one/` there with `RESOLVE_IP=public` or domain name | — |
+| 20 | done | Phase C — `pg_dump` backup workflow set up (`scripts/windows/db-backup.ps1` + `db-restore.ps1`). First snapshot taken on 2026-04-27 of the post-Phase-B DB (21 accounts, 77 characters, `6GOD` row intact). Retention: keep newest 14. Backups written to `local/db-backups/` (gitignored). | `local/db-backups/openmu-20260427-182045.dump` (1.13 MB compressed, 808 TOC entries verified via `pg_restore --list`) |
+| 21 | done | Phase C — promoted custom character `6GOD` to GameMaster (`CharacterStatus = 32`) so slash-commands per `GMchat.md` are usable. Total GM characters in DB now 8 (7 seeded `testgm*` + `6GOD`). Pre-change snapshot saved. | psql `UPDATE` returned `UPDATE 1`; SELECT confirms `data."Character"."CharacterStatus" = 32` on `6GOD`; pre-change dump at `local/db-backups/openmu-20260427-183204.dump` |
+| 22 | pending | Phase D — rent Linux VPS, deploy `OpenMU/deploy/all-in-one/` there with `RESOLVE_IP=public` or domain name | — |
 
 ---
 
@@ -330,6 +331,16 @@ Alternative (in-process): pass `-reinit` to the Startup CLI — it wipes and reb
 
 ### Back up the real DB (do this before any `-reinit`!)
 
+Preferred — use the helper scripts (write to `local/db-backups/`, retain newest 14, verify with `pg_restore --list`):
+
+```powershell
+./scripts/windows/db-backup.ps1                                # snapshot, keep last 14
+./scripts/windows/db-restore.ps1                               # restore newest dump (with confirm)
+./scripts/windows/db-restore.ps1 -DumpFile <path> -Force       # restore specific dump, no prompt
+```
+
+Manual equivalent (what the scripts wrap, in case you need to call `pg_dump` from somewhere else):
+
 ```powershell
 $env:PGPASSWORD = "admin"
 & "C:\Program Files\PostgreSQL\17\bin\pg_dump.exe" -h localhost -U postgres -F c -f "openmu-$(Get-Date -Format yyyyMMdd-HHmmss).dump" openmu
@@ -340,9 +351,11 @@ Restore:
 
 ```powershell
 $env:PGPASSWORD = "admin"
-& "C:\Program Files\PostgreSQL\17\bin\pg_restore.exe" -h localhost -U postgres -d openmu -c "openmu-20260423-195500.dump"
+& "C:\Program Files\PostgreSQL\17\bin\pg_restore.exe" -h localhost -U postgres -d openmu --clean --if-exists "openmu-20260423-195500.dump"
 $env:PGPASSWORD = $null
 ```
+
+**Stop the server first** before restoring or `pg_restore` will fail with "database in use" on the `DROP TABLE` calls.
 
 ### Verify the running server
 
@@ -438,6 +451,9 @@ Other env vars (`src/Startup/Readme.md` lines 53–62):
 | IP resolver parser (Bug 2) | `OpenMU/src/Network/IpAddressResolverFactory.cs` |
 | Error source (Bug 2) | `OpenMU/src/Network/ConfigurableIpResolver.cs` line 70 |
 | Bug 3 migration files (patched) | `Migrations/20260404225637_AddExcellentItemDropLevelDelta.cs`, `Migrations/20260405170905_UpdateDaybreakWeaponDimensions.cs` |
+| DB backup script | `scripts/windows/db-backup.ps1` |
+| DB restore script | `scripts/windows/db-restore.ps1` |
+| DB backup output dir (gitignored) | `local/db-backups/` |
 | Docker path (not used) | `OpenMU/deploy/all-in-one/docker-compose.yml` |
 
 ---
@@ -510,7 +526,7 @@ From `OpenMU/QuickStart.md` lines 131–145. Password always equals the username
 
 | Account | Password | State | Char | Class | Notes |
 |---|---|---|---|---|---|
-| `edwin` | `edwin` | `GameMaster` (=2) | `6GOD` | Dark Knight | Created via admin panel modal. Character created via in-game launcher. CharacterStatus on 6GOD is still 0 (Normal) — to use slash-commands per `GMchat.md`, run `UPDATE data."Character" SET "CharacterStatus" = 32 WHERE "Name" = '6GOD';` |
+| `edwin` | `edwin` | `GameMaster` (=2) | `6GOD` | Dark Knight | Created via admin panel modal. Character created via in-game launcher. **`CharacterStatus = 32` (GameMaster) since 2026-04-27** — slash-commands from `GMchat.md` are live. MU logo shows over the character's head in-game; `/online`, `/teleport`, `/createmonster`, `/post` etc. should work on next login. Pre-change DB snapshot at `local/db-backups/openmu-20260427-183204.dump`. |
 
 ---
 

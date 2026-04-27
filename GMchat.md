@@ -173,7 +173,7 @@ The most valuable GM command. Source: `src/GameLogic/PlugIns/ChatCommands/ItemCh
 
 | Arg | Type | Meaning |
 |---|---|---|
-| `group`  | byte  | Item group (0 = swords, 1 = axes, 2 = scepters, 5 = staves, 7 = shields, 8 = helms, 9 = armors, 10 = pants, 11 = gloves, 12 = boots, 13 = wings/misc, 14 = pets, etc.). See `ItemDefinition.Group`. |
+| `group`  | byte  | Item group. Canonical values from `src/Persistence/Initialization/Items/ItemGroups.cs`: 0 = swords, 1 = axes, 2 = scepters, 3 = spears, 4 = bows, 5 = staves, **6 = shields**, **7 = helms**, **8 = armors (chest)**, **9 = pants**, **10 = gloves**, **11 = boots**, 12 = orbs, 13 = pets/rings/pendants/misc, 14 = pots/misc, 15 = scrolls. See `ItemDefinition.Group`. |
 | `number` | short | Item number within the group. Every item's `(group, number)` pair is visible in admin panel → Game Configuration → Items. |
 | `level`  | byte  | +0 through +15 (capped by item's `MaximumItemLevel`). |
 | `excellentMask` | byte | Bitmask of excellent options. Each bit = one excellent option (e.g. 1 = ExcellentOption #1, 2 = #2, 3 = both, 15 = four options). |
@@ -188,11 +188,17 @@ The most valuable GM command. Source: `src/GameLogic/PlugIns/ChatCommands/ItemCh
 ```
 /item 0 1 9                   -> Short Sword +9
 /item 0 13 13 15 9 1 0 1      -> Lightning Sword +13, 4 excellent options, +9 damage, +Luck, has skill
-/item 9 0 13 0 9 1            -> Bronze Armor +13 +Luck +Option9 for Dark Knight
-/item 14 3 0                  -> Dinorant pet
+/item 8 0 13 0 9 1            -> Bronze Armor (chest) +13 +Luck +Option9 for Dark Knight
+/item 7 0 13 0 9 1            -> Bronze Helm +13 +Luck +Option9
+/item 9 0 13 0 9 1            -> Bronze Pants +13 +Luck +Option9
+/item 10 0 13 0 9 1           -> Bronze Gloves +13 +Luck +Option9
+/item 11 0 13 0 9 1           -> Bronze Boots +13 +Luck +Option9
+/item 6 0 13                  -> Small Shield +13
+/item 14 3 0                  -> Dinorant pet (group 13 in some seeds; check item editor)
 /item 14 4 0                  -> Fenrir pet
-/item 12 8 13                 -> Crimson Glory Pants +13
 ```
+
+> **Off-by-one warning:** earlier revisions of this doc had the armor groups shifted by one (shield=7, helm=8, etc.). The values above match the `ItemGroups` enum in source. If a command says "item not found", verify the group/number in Admin Panel → Game Configuration → Items.
 
 **Tip:** To find the `(group, number)` of any item, open the admin panel → **Game Configuration → Items** → search by name → the URL of the edit page contains the item's id and the form shows Group + Number as separate fields.
 
@@ -206,7 +212,9 @@ The most valuable GM command. Source: `src/GameLogic/PlugIns/ChatCommands/ItemCh
 2. Click **Plug-Ins** (puzzle piece, bottom of the dropdown).
 3. The plug-in list is grouped by extension point. Scroll or filter to **"Chat commands"**.
 4. For each plug-in you want, click **Edit** and toggle **Enabled** on.
-5. **No restart needed** — plug-in state is hot-reloaded (verified in source: plug-in manager observes DB changes).
+5. **No restart needed *if* you toggle via the admin panel UI** — it mutates the tracked EF entity, which fires `PlugInConfiguration.PropertyChanged` → `PlugInManager.OnConfigurationChanged` → activate/deactivate live. Verified in `src/PlugIns/PlugInManager.cs:445-466`.
+
+> **Caveat for SQL toggles:** if you flip `IsActive` directly in `config."PlugInConfiguration"` via psql, the in-memory `PlugInConfiguration` object stays stale (no `PropertyChanged` event fires). You **must restart the server** for SQL-based toggles to take effect. Take a backup with `./scripts/windows/db-backup.ps1`, stop the server, run the UPDATE, start the server.
 
 Disabled-by-default commands (the full list, grep'd from `IDisabledByDefault` in the repo):
 
@@ -240,7 +248,114 @@ Paste these into the in-game chat bar to prove GM works:
 
 ---
 
-## 6. File / source references
+## 6. Gearing a low-stat Dark Knight (case study: `6GOD`)
+
+This section is a worked example for kitting out a freshly-promoted GM character that started with default stats. `6GOD` is the project's own custom DK; the same logic applies to any low-level character.
+
+### 6.1 Stat budget reality check
+
+Default Dark Knight base stats (from `src/Persistence/Initialization/CharacterClasses/ClassDarkKnight.cs`):
+
+| Stat | Base | + 30 unspent points (worst-case all-in-one) |
+|---|---|---|
+| Strength | 28 | 58 |
+| Agility  | 20 | 50 |
+| Vitality | 25 | 55 |
+| Energy   | 10 | 40 |
+
+**Lowest STR requirement on any DK-eligible armor piece in `Armors.cs` is 80** (Bronze Helm/Armor/Pants/Gloves/Boots, also Leather variants). Lowest shield is Small Shield at **70 STR**. Lowest DK weapon is **Small Axe at 18 STR / 0 AGI** — that's the *only* item the character can wear at default stats + 30 points.
+
+> **Rule of thumb:** if the stat budget is < 80 STR, no armor piece will equip. Bump stats first (§6.2), then gear (§6.3 / §6.4).
+
+### 6.2 Two ways to bump stats so armor actually equips
+
+#### Option A — Enable `/add` chat commands (clean, in-game)
+
+1. Admin panel → **Game Configuration → Plug-Ins** (see §4).
+2. Filter to "Chat commands" → enable **`AddChatCommand`** (and optionally `AddStrengthChatCommand` etc.).
+3. In-game type:
+
+```
+/add str 200 6GOD
+/add agi 50 6GOD
+/add vit 50 6GOD
+```
+
+Numbers above clear every armor requirement up to and including Dark Phoenix.
+
+#### Option B — Direct SQL (fastest, dirtiest)
+
+Stop the server, then:
+
+```sql
+UPDATE data."Character"
+SET    "Strength" = 250,
+       "Agility"  = 80,
+       "Vitality" = 80,
+       "Energy"   = 30
+WHERE  "Name" = '6GOD';
+```
+
+Restart, log in. Take a snapshot first with `./scripts/windows/db-backup.ps1`.
+
+### 6.3 Tier 1 — Bronze full set (str 80, the cheapest fit)
+
+Useful as a sanity check before chasing endgame:
+
+```
+/item 7  0 15 15 7 1   -> Bronze Helm   +15, 4 exc, +7, +Luck
+/item 8  0 15 15 7 1   -> Bronze Armor  +15, 4 exc, +7, +Luck
+/item 9  0 15 15 7 1   -> Bronze Pants  +15, 4 exc, +7, +Luck
+/item 10 0 15 15 7 1   -> Bronze Gloves +15, 4 exc, +7, +Luck
+/item 11 0 15 15 7 1   -> Bronze Boots  +15, 4 exc, +7, +Luck
+/item 6  0 15 15 7 1   -> Small Shield  +15, 4 exc, +7, +Luck (off-hand)
+```
+
+### 6.4 Tier 2 — Dark Phoenix endgame DK-exclusive set (item number 17)
+
+The iconic Season 6 DK-only set (`darkKnightClassLevel=2` in `Armors.cs`, no other class can equip). Requires STR ≈ 198–214, AGI ≈ 60–65 — that's why §6.2 happens first.
+
+```
+/item 7  17 15 15 7 1   -> Dark Phoenix Helm   +15, 4 exc, +7, +Luck
+/item 8  17 15 15 7 1   -> Dark Phoenix Armor  +15, 4 exc, +7, +Luck
+/item 9  17 15 15 7 1   -> Dark Phoenix Pants  +15, 4 exc, +7, +Luck
+/item 10 17 15 15 7 1   -> Dark Phoenix Gloves +15, 4 exc, +7, +Luck
+/item 11 17 15 15 7 1   -> Dark Phoenix Boots  +15, 4 exc, +7, +Luck
+```
+
+### 6.5 Off-hand & weapon picks for DK
+
+```
+/item 6 17 15 15 7 1    -> Crimson Glory shield +15 (DK-exclusive, group 6 num 17)
+/item 0 8 15 15 7 1     -> Bone Blade +15, 4 exc, +7, +Luck (the user's earlier pick)
+/item 1 0 15 15 7 1     -> Small Axe +15 (the only weapon equippable at default DK stats)
+```
+
+### 6.6 Other DK-exclusive set numbers (for variety)
+
+All use the same `(group, number)` pattern across the 5 armor slots (helm 7 / armor 8 / pants 9 / gloves 10 / boots 11). Pick one number, fire 5 `/item` commands.
+
+| Set name | Item # | STR req (approx) | Notes |
+|---|---|---|---|
+| Bronze         | 0  | 80   | DK + DL |
+| Dragon         | 1  | 120  | DK + DL |
+| Leather        | 5  | 80   | DK + Elf + MG + RF |
+| Scale          | 6  | 110  | DK + Elf + MG + RF |
+| Brass          | 8  | 100  | DK + MG + RF |
+| Plate          | 9  | 130  | DK + MG + RF |
+| Black Dragon   | 16 | 170  | DK only |
+| **Dark Phoenix** | **17** | **214** | **DK only — endgame canonical** |
+| Great Dragon   | 21 | 200  | DK only (knightClass=2) |
+| Ashcrow        | 34 | 160  | DK only |
+| Titan          | 45 | 222  | DK only |
+| Brave          | 46 | 74 STR / 162 AGI | DK only — AGI build |
+| Dragon Knight  | 29 | 170 + level 380 | DK only, hardest gate |
+
+> Source-of-truth for every requirement: `src/Persistence/Initialization/VersionSeasonSix/Items/Armors.cs`. The arg layout for `CreateArmor`/`CreateGloves`/`CreateBoots` is `number, name, dropLevel, defense, durability, levelReq, strReq, agiReq, eneReq, vitReq, ldrReq, dw, dk, elf, mg, dl, sm, rf` (with slight variations per signature — see `src/Persistence/Initialization/Items/ArmorInitializerBase.cs`).
+
+---
+
+## 7. File / source references
 
 | What | Where |
 |---|---|
